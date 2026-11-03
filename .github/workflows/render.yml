@@ -1,0 +1,45 @@
+
+name: LEGALHUSTL Cloud Video Renderer
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: legalhustl-video-renderer
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout renderer
+        uses: actions/checkout@v7
+
+      - name: Install FFmpeg and fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Render queued videos
+        env:
+          APP_SCRIPT_BRIDGE_URL: ${{ secrets.APP_SCRIPT_BRIDGE_URL }}
+          VIDEO_BRIDGE_TOKEN: ${{ secrets.VIDEO_BRIDGE_TOKEN }}
+          MAX_JOBS_PER_RUN: "2"
+        run: python worker.py

@@ -1,5 +1,4 @@
-
-name: LEGALHUSTL Cloud Video Renderer
+name: SENTINEL LAW Motion Engine
 
 on:
   schedule:
@@ -10,16 +9,16 @@ permissions:
   contents: read
 
 concurrency:
-  group: legalhustl-video-renderer
+  group: sentinel-law-video-renderer
   cancel-in-progress: false
 
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 15
 
     steps:
-      - name: Checkout renderer
+      - name: Checkout video engine
         uses: actions/checkout@v7
 
       - name: Install FFmpeg and fonts
@@ -37,9 +36,12 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
+      - name: Run renderer regression tests
+        run: python -m unittest discover -s tests -v
+
       - name: Render queued videos
         env:
           APP_SCRIPT_BRIDGE_URL: ${{ secrets.APP_SCRIPT_BRIDGE_URL }}
           VIDEO_BRIDGE_TOKEN: ${{ secrets.VIDEO_BRIDGE_TOKEN }}
-          MAX_JOBS_PER_RUN: "2"
+          MAX_JOBS_PER_RUN: "1"
         run: python worker.py

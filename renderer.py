@@ -1,4 +1,4 @@
-"""SENTINEL LAW Motion Engine V3.
+"""SENTINEL LAW Motion Engine V4.
 
 Editorial kinetic motion design inspired by the supplied Remotion reference:
 light canvas, bold typography, violet accents, layered legal graphics,
@@ -58,6 +58,7 @@ def _clean(value: Any, limit: int = MAX_SCRIPT_CHARS) -> str:
 
 
 def _is_direction(line: str) -> bool:
+    """Return True for production notes, not audience-facing copy."""
     value = line.strip().lstrip("-•* ").strip()
     if not value:
         return True
@@ -65,47 +66,98 @@ def _is_direction(line: str) -> bool:
         return True
     if re.match(r"^\[?(?:0?\d{1,2}:\d{2}|\d{1,2}\s*[–-]\s*\d{1,2}\s*(?:с|сек|секунд))\]?\s*:?$", value, re.I):
         return True
-    directions = (
-        "ВІЗУАЛ", "ВІДЕОРЯД", "КАДР", "КАМЕРА", "АНІМАЦІЯ", "ЕФЕКТ",
-        "ПЕРЕХІД", "МУЗИКА", "ЗВУК", "ТАЙМІНГ", "ТРИВАЛІСТЬ", "ГРАФІКА",
-        "КОМПОЗИЦІЯ", "ІНСТРУКЦІЯ", "ПІДКАЗКА", "ПЛАШКА", "ФОН",
-        "СЦЕНАРІЙ", "ФОРМАТ", "ТЕХНІЧНЕ ЗАВДАННЯ", "VIDEO PROMPT",
-        "РЕЖИСЕРСЬКА ВКАЗІВКА", "ОПИС СЦЕНИ"
-    )
     upper = value.upper()
-    return any(re.match(r"^" + re.escape(label) + r"\s*:", upper) for label in directions)
+    # Prefix matching is deliberate: catches headings such as "ВІЗУАЛЬНІ ПРИМІТКИ:".
+    direction_patterns = (
+        r"^(?:ВІЗУАЛ\w*|ВІДЕОРЯД|КАДР\w*|КАМЕРА|АНІМАЦІ\w*|ЕФЕКТ\w*|ПЕРЕХІД\w*|"
+        r"МУЗИКА|ЗВУК|ТАЙМІНГ|ТРИВАЛІСТЬ|ГРАФІКА|КОМПОЗИЦІ\w*|ІНСТРУКЦІ\w*|"
+        r"ПІДКАЗКА|ПЛАШКА|ФОН|СЦЕНАРІЙ|ФОРМАТ|ТЕХНІЧНЕ ЗАВДАННЯ|VIDEO PROMPT|"
+        r"РЕЖИСЕРСЬКА ВКАЗІВКА|ОПИС СЦЕНИ|ВКАЗІВКИ ДЛЯ МОНТАЖУ)(?:\s*\([^)]*\))?\s*:",
+        r"^(?:ВИКОРИСТОВУЙ|ВИКОРИСТОВУВАТИ|ПОКАЖИ|ПОКАЗАТИ|НЕ ПОКАЗУЙ|НЕ ПОКАЗУВАТИ|"
+        r"ЗРОБИ|ЗРОБИТИ|ДОДАЙ|ДОДАТИ|ВИКОРИСТАЙ|ВИКОРИСТАТИ|АНІМУЙ|АНІМУВАТИ)\b",
+    )
+    return any(re.search(pattern, upper, re.I) for pattern in direction_patterns)
+
+
+def _is_production_instruction(text: str) -> bool:
+    value = re.sub(r"\s+", " ", text or "").strip().upper()
+    if not value:
+        return True
+    patterns = (
+        r"^(?:ВИКОРИСТОВУВАТИ|ВИКОРИСТОВУЙ|ВИКОРИСТАЙ|ПОКАЗАТИ|ПОКАЖИ|НЕ ПОКАЗУВАТИ|"
+        r"НЕ ПОКАЗУЙ|ЗРОБИТИ|ЗРОБИ|ДОДАТИ|ДОДАЙ|АНІМУВАТИ|АНІМУЙ)\b",
+        r"^(?:ВІЗУАЛЬНІ? ПРИМІТКИ|РЕЖИСЕРСЬКІ ВКАЗІВКИ|ТЕХНІЧНЕ ЗАВДАННЯ)\b",
+    )
+    return any(re.search(pattern, value, re.I) for pattern in patterns)
 
 
 def _extract_script_text(script: str) -> str:
+    """Extract only audience-facing content from free-form or production-style scripts.
+
+    Supported script labels are retained after removing their labels. Production directions
+    and their continuation lines are discarded. Plain prose remains untouched.
+    """
     source = _clean(script)
     if not source:
         return ""
     keep_labels = (
         "ТЕКСТ НА ЕКРАНІ", "ТЕКСТ ДИКТОРА", "ОЗВУЧКА", "ДИКТОР",
-        "РЕПЛІКА", "ТЕКСТ", "ПОВІДОМЛЕННЯ", "НА ЕКРАНІ",
-        "ГОЛОС ЗА КАДРОМ", "СУБТИТРИ"
+        "РЕПЛІКА", "ПОВІДОМЛЕННЯ", "НА ЕКРАНІ", "ГОЛОС ЗА КАДРОМ", "СУБТИТРИ",
+        "ФАКТ", "УМОВА", "ЩО ВАЖЛИВО", "МІФ", "ПРАВДА", "ПОМИЛКА", "ПРАВИЛО",
+        "АЛГОРИТМ", "ДІЯ", "РИЗИК", "ВИСНОВОК", "ЗАПИТАННЯ", "ВІДПОВІДЬ",
+        "ЩО ЗМІНИЛОСЯ", "ГОЛОВНЕ"
+    )
+    technical_heading = re.compile(
+        r"^(?:ВІЗУАЛ\w*|ВІДЕОРЯД|КАМЕРА|АНІМАЦІ\w*|ЕФЕКТ\w*|ПЕРЕХІД\w*|"
+        r"МУЗИКА|ЗВУК|ТАЙМІНГ|ТРИВАЛІСТЬ|ГРАФІКА|КОМПОЗИЦІ\w*|ІНСТРУКЦІ\w*|"
+        r"РЕЖИСЕРСЬКА ВКАЗІВКА|ТЕХНІЧНЕ ЗАВДАННЯ|ОПИС СЦЕНИ|ПІДКАЗКА ДЛЯ МОНТАЖУ)"
+        r"(?:\s*\([^)]*\))?\s*:\s*(.*)$", re.I
     )
     out: List[str] = []
+    skip_continuation = False
     for raw in source.split("\n"):
         line = raw.strip().lstrip("-•* ").strip()
-        if not line or _is_direction(line):
+        if not line:
             continue
-        kept = False
+        # A new explicit audience-text field ends a preceding production-notes block.
+        audience_match = None
         for label in keep_labels:
             m = re.match(r"^" + re.escape(label) + r"\s*:\s*(.*)$", line, re.I)
             if m:
-                if m.group(1).strip():
-                    out.append(m.group(1).strip())
-                kept = True
+                audience_match = m
                 break
-        if kept:
+        if audience_match:
+            value = audience_match.group(1).strip()
+            skip_continuation = False
+            if value and not _is_production_instruction(value):
+                if label in ("МІФ", "ПРАВДА"):
+                    out.append(label + ": " + value)
+                else:
+                    out.append(value)
             continue
+        if technical_heading.match(line):
+            skip_continuation = True
+            continue
+        if _is_direction(line):
+            skip_continuation = True
+            continue
+        if skip_continuation:
+            # Bulleted or imperative continuation lines still belong to director notes.
+            if _is_production_instruction(line) or re.match(r"^(?:[-•*]|\d+[.)])\s*", raw.strip()):
+                continue
+            # Ordinary sentence resumes the actual script.
+            skip_continuation = False
         if re.match(r"^(?:ведучий|ведуча|голос за кадром|завершення|вступ)\s*:\s*$", line, re.I):
             continue
-        out.append(line)
+        if _is_production_instruction(line):
+            continue
+        # Drop duplicated fragments of a direction accidentally embedded in a content field.
+        line = re.sub(r"(?i)\bвізуальні? примітки\s*:?\s*", "", line).strip()
+        line = re.sub(r"(?i)\bвикористовувати текстові картки\b[^.]*\.?", "", line).strip()
+        if line:
+            out.append(line)
     result = re.sub(r"\s+", " ", " ".join(out)).strip()
     return result
-
 
 def _sentences(text: str) -> List[str]:
     parts = re.split(r"(?<=[.!?;])\s+|\n+", text)
@@ -265,6 +317,74 @@ def _scene_label(text: str, index: int, total: int) -> str:
     return "КЛЮЧОВИЙ ФАКТ" if index == 1 else "ПРАВОВЕ ПОЯСНЕННЯ"
 
 
+VIDEO_TYPE_LABELS = {
+    "news": "НОВИНА / ЗМІНИ",
+    "explainer": "ПРАВОВЕ ПОЯСНЕННЯ",
+    "howto": "ПОКРОКОВА ІНСТРУКЦІЯ",
+    "myth_fact": "МІФ / ПРАВДА",
+    "case": "СУДОВА ПРАКТИКА",
+    "checklist": "ЧЕКЛІСТ",
+    "comparison": "ПОРІВНЯННЯ",
+    "qa": "ПИТАННЯ / ВІДПОВІДЬ",
+    "risk": "ЮРИДИЧНИЙ РИЗИК",
+}
+
+
+def _infer_video_type(job: Dict[str, Any]) -> str:
+    """Select an editorial video structure from explicit metadata or source wording."""
+    raw = str(job.get("video_type") or job.get("visual_type") or job.get("content_type") or "").strip().lower()
+    aliases = {
+        "news": "news", "новина": "news", "зміни законодавства": "news", "законодавчі зміни": "news",
+        "explainer": "explainer", "пояснення": "explainer", "роз'яснення": "explainer", "роз’яснення": "explainer",
+        "howto": "howto", "інструкція": "howto", "алгоритм": "howto", "покрокова інструкція": "howto",
+        "myth_fact": "myth_fact", "міф/правда": "myth_fact", "міф / правда": "myth_fact", "міф-факт": "myth_fact",
+        "case": "case", "судова справа": "case", "судова практика": "case", "кейс": "case",
+        "checklist": "checklist", "чекліст": "checklist", "перелік": "checklist",
+        "comparison": "comparison", "порівняння": "comparison", "було/стало": "comparison",
+        "qa": "qa", "питання-відповідь": "qa", "питання / відповідь": "qa",
+        "risk": "risk", "ризики": "risk", "попередження": "risk",
+    }
+    if raw in aliases:
+        return aliases[raw]
+    text = " ".join(str(job.get(k) or "") for k in ("topic", "headline", "script", "caption")).lower()
+    # Strong semantic signals take precedence over generic words such as "постанова".
+    if re.search(r"\b(міф|правда чи міф|неправда|поширене твердження|насправді)\b", text):
+        return "myth_fact"
+    if re.search(r"(справа\s*№|єдрср|суд постановив|суд дійшов висновку|рішення суду|судове рішення|правова позиція суду|позивач|відповідач|у справі|суд.{0,30}справ)", text):
+        return "case"
+    if re.search(r"(чекліст|перелік документів|які документи|список документів|що підготувати|перевірте наявність)", text):
+        return "checklist"
+    if re.search(r"(було\s*/\s*стало|до\s*/\s*після|порівнян|відмінност|на відміну від|чим відрізняється)", text):
+        return "comparison"
+    if re.search(r"(не робіть|не можна ігнорувати|ризик|ризики|штраф|відповідальність|може призвести|небезпек|помилка коштує)", text):
+        return "risk"
+    if re.search(r"(як (?:отримати|подати|оскаржити|оформити|звернутися|діяти)|покроков|алгоритм дій|послідовність дій|етапи|що робити спочатку)", text):
+        return "howto"
+    if re.search(r"(чи має право|чи можна|чи повинен|що робити\??|як діяти\??|\?)", str(job.get("headline") or "").lower()):
+        return "qa"
+    if re.search(r"(ухвалено|ухвалила|ухвалив|набра(в|ла) чинності|законопроєкт|внесено зміни|затверджено|затвердив|запроваджено|оновлено порядок|оприлюднено)", text):
+        return "news"
+    return "explainer"
+
+
+def _layout_for(video_type: str, index: int, content_id: str) -> str:
+    """Cycle among related layouts so two videos of the same type need not look identical."""
+    salt = sum(ord(ch) for ch in str(content_id))
+    variant = (index + salt) % 2
+    variants = {
+        "news": ("news_bulletin", "news_timeline"),
+        "explainer": ("concept_map", "editorial_layers"),
+        "howto": ("steps_rail", "steps_cards"),
+        "myth_fact": ("myth_split", "myth_reveal"),
+        "case": ("case_timeline", "case_dossier"),
+        "checklist": ("checklist_grid", "checklist_stack"),
+        "comparison": ("comparison_split", "comparison_scale"),
+        "qa": ("question_card", "answer_focus"),
+        "risk": ("risk_alert", "risk_path"),
+    }
+    return variants.get(video_type, ("concept_map", "editorial_layers"))[variant]
+
+
 def _make_scenes(job: Dict[str, Any]) -> List[Dict[str, str]]:
     fmt = str(job.get("format") or "Reels").strip().lower()
     headline = _clean(job.get("headline") or job.get("topic") or "Правовий розбір", 500)
@@ -272,26 +392,28 @@ def _make_scenes(job: Dict[str, Any]) -> List[Dict[str, str]]:
     if not script:
         script = headline
     cta = _clean(job.get("cta") or "Збережіть матеріал, щоб повернутися до нього", 400)
+    content_id = str(job.get("content_id") or job.get("job_id") or headline)
+    video_type = _infer_video_type({**job, "script": script})
+    type_label = VIDEO_TYPE_LABELS.get(video_type, "ПРАВОВИЙ РОЗБІР")
     if fmt == "story":
         return [{
-            "kind": "story", "label": "SENTINEL LAW",
-            "title": _clean(job.get("story_title") or headline, 400),
-            "body": script,
+            "kind": "story", "label": "SENTINEL LAW", "title": _clean(job.get("story_title") or headline, 400),
+            "body": script, "video_type": video_type, "layout": _layout_for(video_type, 0, content_id),
         }]
     chunks = _split_script(script)
-    scenes: List[Dict[str, str]] = [{"kind": "cover", "label": "ПРАВОВИЙ РОЗБІР", "title": headline, "body": ""}]
+    scenes: List[Dict[str, str]] = [{
+        "kind": "cover", "label": type_label, "title": headline, "body": "", "video_type": video_type,
+    }]
     for i, chunk in enumerate(chunks, start=1):
         scenes.append({
-            "kind": "content",
-            "label": _scene_label(chunk, i, len(chunks)),
-            "title": "",
-            "body": chunk,
+            "kind": "content", "label": type_label, "title": "", "body": chunk,
+            "video_type": video_type, "layout": _layout_for(video_type, i, content_id),
+            "sequence": str(i),
         })
     cta_words = cta.split()
     closing_title = " ".join(cta_words[:2]) if len(cta_words) > 2 else cta
-    scenes.append({"kind": "closing", "label": "SENTINEL LAW", "title": closing_title, "body": cta})
+    scenes.append({"kind": "closing", "label": "SENTINEL LAW", "title": closing_title, "body": cta, "video_type": video_type})
     return scenes
-
 
 def _scene_durations(scenes: Sequence[Dict[str, str]], fmt: str) -> List[float]:
     if fmt.lower() == "story":
@@ -481,7 +603,7 @@ def _key_points(text: str) -> List[str]:
             words = value.split()
             value = " ".join(words[:7])
         if value.lower() not in [p.lower() for p in points]:
-            points.append(value)
+            points.append(_visual_excerpt(value, 6))
         if len(points) == 3:
             break
     if len(points) < 3:
@@ -493,6 +615,90 @@ def _key_points(text: str) -> List[str]:
             if candidate and candidate.lower() not in [p.lower() for p in points]:
                 points.append(candidate)
     return points[:3]
+
+
+def _visual_excerpt(text: str, max_words: int = 6) -> str:
+    words = re.sub(r"\s+", " ", text or "").strip().split()
+    if len(words) <= max_words:
+        return " ".join(words)
+    return " ".join(words[:max_words]).rstrip(" ,;:") + "…"
+
+
+def _visual_points(text: str, limit: int = 3) -> List[str]:
+    """Make non-repeating visual excerpts strictly from the supplied sentence."""
+    source = re.sub(r"\s+", " ", text or "").strip()
+    if not source:
+        return []
+    candidates = re.split(r"(?<=[.!?;])\s+|\s*,\s*|\s+(?:але|якщо|коли|тому|оскільки|водночас|також)\s+", source, flags=re.I)
+    points: List[str] = []
+    for value in candidates:
+        value = value.strip(" .,:;—–-")
+        if len(value) >= 8 and value.lower() not in [x.lower() for x in points]:
+            points.append(_visual_excerpt(value, 6))
+        if len(points) >= limit:
+            return points[:limit]
+    # If it is one uninterrupted sentence, partition its original words; do not clone copy.
+    words = source.split()
+    if len(points) < limit and len(words) > 1:
+        chunk_size = max(1, math.ceil(len(words) / limit))
+        points = [_visual_excerpt(" ".join(words[i:i + chunk_size]), 6)
+                  for i in range(0, len(words), chunk_size)]
+        points = [x for x in points if x]
+    return points[:limit]
+
+
+def _draw_cover_motif(draw: ImageDraw.ImageDraw, video_type: str, elapsed: float) -> None:
+    """Distinct cover motif for each editorial format; no stock people or fabricated seals."""
+    p = _spring((elapsed - .72) / .7)
+    if video_type == "news":
+        draw.rounded_rectangle((82, 800, 638, 910), radius=18, fill=(255,255,255,235), outline=(210,206,219,230), width=2)
+        draw.rounded_rectangle((105, 825, 248, 865), radius=8, fill=(*PURPLE_LIGHT,255))
+        draw.text((119, 836), "ОНОВЛЕННЯ", font=_font(_find_font(True),14), fill=PURPLE_DARK)
+        draw.line((280,846,600,846), fill=(193,182,222,255), width=5)
+        for x in (290,430,585):
+            r=int(10*p); draw.ellipse((x-r,846-r,x+r,846+r),fill=(*PURPLE,255))
+    elif video_type == "howto":
+        for i,x in enumerate((150,360,570)):
+            r=int(37*p); y=850
+            draw.ellipse((x-r,y-r,x+r,y+r), fill=(132,82,247,245), outline=(102,54,211,255), width=2)
+            f=_font(_find_font(True),26); label=f"{i+1:02d}"; w=draw.textlength(label,font=f)
+            draw.text((x-w/2,y-17),label,font=f,fill=WHITE)
+            if i<2: draw.line((x+45,y,x+165,y),fill=(193,182,222,255),width=4)
+    elif video_type == "myth_fact":
+        draw.rounded_rectangle((80,790,340,910),radius=16,fill=(255,255,255,240),outline=(210,206,219,255),width=2)
+        draw.rounded_rectangle((380,790,640,910),radius=16,fill=(*PURPLE_LIGHT,255),outline=(*PURPLE,255),width=2)
+        draw.text((132,829),"МІФ",font=_font(_find_font(True),26),fill=MUTED)
+        draw.text((432,829),"ФАКТ",font=_font(_find_font(True),26),fill=PURPLE_DARK)
+        draw.text((344,830),"/",font=_font(_find_font(True),26),fill=PURPLE_DARK)
+    elif video_type == "case":
+        draw.rounded_rectangle((125,785,595,925),radius=16,fill=(255,255,255,235),outline=(210,206,219,255),width=2)
+        draw.line((170,820,170,885),fill=(*PURPLE,255),width=5)
+        for y in (825,855,885): draw.ellipse((158,y-7,182,y+7),fill=(*PURPLE,255))
+        for i,y in enumerate((820,850,880)):
+            draw.rounded_rectangle((205,y,545,y+7),radius=3,fill=(200,196,211,220))
+    elif video_type == "checklist":
+        for i,(x,y) in enumerate(((110,800),(280,835),(450,800))):
+            draw.rounded_rectangle((x,y,x+120,y+92),radius=14,fill=(255,255,255,240),outline=(210,206,219,255),width=2)
+            draw.rounded_rectangle((x+25,y+25,x+95,y+33),radius=4,fill=(*PURPLE,240))
+            draw.rounded_rectangle((x+25,y+48,x+82,y+56),radius=4,fill=(205,201,215,235))
+    elif video_type == "comparison":
+        draw.rounded_rectangle((75,800,340,920),radius=16,fill=(255,255,255,240),outline=(210,206,219,255),width=2)
+        draw.rounded_rectangle((380,800,645,920),radius=16,fill=(*PURPLE_LIGHT,255),outline=(*PURPLE,255),width=2)
+        draw.text((165,835),"A",font=_font(_find_font(True),46),fill=INK)
+        draw.text((470,835),"B",font=_font(_find_font(True),46),fill=PURPLE_DARK)
+    elif video_type == "qa":
+        draw.ellipse((405,755,625,975),outline=(132,82,247,110),width=5)
+        draw.text((468,760),"?",font=_font(_find_font(True),155),fill=(*PURPLE,230))
+    elif video_type == "risk":
+        points=[(540,760),(660,940),(420,940)]
+        draw.polygon(points,fill=(*PURPLE_LIGHT,255),outline=(*PURPLE,255))
+        draw.text((515,810),"!",font=_font(_find_font(True),95),fill=PURPLE_DARK)
+    else:
+        for i,(x,y) in enumerate(((150,850),(360,790),(570,850))):
+            r=int(33*p); draw.ellipse((x-r,y-r,x+r,y+r),outline=(132,82,247,185),width=4)
+            draw.line((x-16,y,x-4,y+13),fill=(*PURPLE_DARK,255),width=7)
+            draw.line((x-4,y+13,x+20,y-18),fill=(*PURPLE_DARK,255),width=7)
+            if i<2: draw.line((x+34,y,x+175,y-35 if i==0 else y+35),fill=(203,194,224,255),width=3)
 
 
 def _short_heading(text: str) -> str:
@@ -551,45 +757,275 @@ def _draw_cover(canvas: Image.Image, scene: Dict[str, str], elapsed: float) -> N
         max_width=620, max_height=400, preferred=76, elapsed=elapsed - .22,
         color=INK, line_delay=.15
     )
-    # Animated document / legal stamp motif, no human face or stock person.
-    stamp_p = _spring((elapsed - .72) / .7)
-    cx, cy = 550, 890
-    r = int(125 * stamp_p)
-    d.ellipse((cx-r, cy-r, cx+r, cy+r), outline=_alpha(PURPLE, .55), width=5)
-    d.ellipse((cx-int(r*.75), cy-int(r*.75), cx+int(r*.75), cy+int(r*.75)),
-              outline=_alpha(PURPLE, .32), width=3)
-    d.line((cx-66, cy, cx-18, cy+45), fill=_alpha(PURPLE_DARK, stamp_p), width=13)
-    d.line((cx-18, cy+45, cx+76, cy-65), fill=_alpha(PURPLE_DARK, stamp_p), width=13)
-    # A small stack of document cards slides from the edge.
-    for i in range(3):
-        offset = int((1-_ease_out((elapsed-.95-i*.12)/.48))*100)
-        x, y = 90+i*28+offset, 770+i*18
-        _round_rect(d, (x, y, x+210, y+118), 12, (255,255,255,230),
-                    (207,203,217,220), 2)
-        d.rounded_rectangle((x+16,y+20,x+95,y+27),radius=3,fill=(132,82,247,190))
-        d.rounded_rectangle((x+16,y+42,x+180,y+49),radius=3,fill=(207,204,215,230))
-        d.rounded_rectangle((x+16,y+65,x+145,y+72),radius=3,fill=(207,204,215,230))
+    # Cover motif follows the editorial type instead of repeating one generic stamp.
+    _draw_cover_motif(d, scene.get("video_type", "explainer"), elapsed)
+
+
+def _draw_visual_card(draw: ImageDraw.ImageDraw, box, label: str, body: str,
+                      elapsed: float, accent=True, body_size: int = 23) -> None:
+    x1, y1, x2, y2 = box
+    alpha = _ease_out((elapsed - 0.12) / 0.42)
+    lift = int((1 - alpha) * 28)
+    draw.rounded_rectangle((x1 + 6, y1 + lift + 8, x2 + 6, y2 + lift + 8), radius=18,
+                           fill=(18, 14, 35, int(alpha * 22)))
+    draw.rounded_rectangle((x1, y1 + lift, x2, y2 + lift), radius=18,
+                           fill=_alpha(WHITE, alpha), outline=_alpha((208, 204, 218), alpha), width=2)
+    f_label = _font(_find_font(True), 16)
+    draw.text((x1 + 22, y1 + 18 + lift), label.upper(), font=f_label,
+              fill=_alpha(PURPLE_DARK if accent else MUTED, alpha))
+    draw.rounded_rectangle((x1 + 22, y1 + 47 + lift, x1 + 104, y1 + 53 + lift), radius=3,
+                           fill=_alpha(PURPLE if accent else LINE, alpha))
+    visual_body = _visual_excerpt(body, 6)
+    font, lines, lh = _fit(draw, visual_body, _find_font(True), x2 - x1 - 44, y2 - y1 - 84, body_size, 17, 1.10)
+    yy = y1 + 70 + lift
+    for line in lines:
+        draw.text((x1 + 22, yy), line, font=font, fill=_alpha(INK, alpha))
+        yy += lh
+
+
+def _draw_news_visual(canvas: Image.Image, scene: Dict[str, str], elapsed: float, timeline=False) -> None:
+    d = ImageDraw.Draw(canvas, "RGBA")
+    body = scene.get("body", "")
+    p = _ease_out((elapsed - .15) / .5)
+    d.rounded_rectangle((60, 460, 660, 900), radius=24, fill=(255,255,255,242), outline=(210,206,219,255), width=2)
+    d.rounded_rectangle((84, 485, 240, 527), radius=9, fill=(*PURPLE_LIGHT,255))
+    d.text((100, 497), "ОФІЦІЙНЕ ОНОВЛЕННЯ", font=_font(_find_font(True), 14), fill=PURPLE_DARK)
+    d.text((85, 555), "ЩО ЗМІНИЛОСЯ", font=_font(_find_font(True), 27), fill=INK)
+    excerpt = _visual_excerpt(body, 5)
+    font, lines, lh = _fit(d, excerpt, _find_font(True), 500, 132, 27, 19, 1.12)
+    y = 610
+    for line in lines:
+        d.text((86, y), line, font=font, fill=INK); y += lh
+    if timeline:
+        yline = 810
+        d.line((100, yline, 615, yline), fill=(190,178,220,255), width=4)
+        for i, x in enumerate((112, 365, 608)):
+            r = int(12 * p)
+            d.ellipse((x-r,yline-r,x+r,yline+r), fill=(*PURPLE,255))
+        labels = ["ПОДІЯ", "НОРМА", "ЗАСТОСУВАННЯ"]
+        for x, label in zip((112,365,608), labels):
+            f = _font(_find_font(True), 13); w = d.textlength(label,font=f)
+            d.text((x-w/2, 838),label,font=f,fill=MUTED)
+    else:
+        d.rounded_rectangle((86, 808, 610, 824), radius=7, fill=(239,235,246,255))
+        d.rounded_rectangle((86, 808, 86 + int(524*p), 824), radius=7, fill=(*PURPLE,255))
+
+
+def _draw_explainer_visual(canvas: Image.Image, scene: Dict[str, str], elapsed: float, layered=False) -> None:
+    d = ImageDraw.Draw(canvas, "RGBA")
+    body = scene.get("body", "")
+    points = _visual_points(body) or [body]
+    points = (points + _visual_points(body)[len(points):])[:3]
+    if layered:
+        boxes = [(70,455,650,575),(105,610,615,730),(70,765,650,885)]
+        labels = ["КЛЮЧОВА ТЕЗА", "ПРАВОВИЙ КОНТЕКСТ", "ЩО ВАРТО ВРАХУВАТИ"]
+        for i, (box, point, label) in enumerate(zip(boxes, points, labels)):
+            _draw_visual_card(d, box, label, point, elapsed - i*.12, accent=(i==1), body_size=22)
+    else:
+        # Three connected nodes: visually explains dependencies without inventing extra legal content.
+        d.line((155, 650, 565, 650), fill=(202,190,227,255), width=6)
+        xs = (155,360,565)
+        labels = ["01", "02", "03"]
+        for i, (x, point) in enumerate(zip(xs, points)):
+            a = _ease_out((elapsed-.18-i*.18)/.45)
+            r = 43
+            d.ellipse((x-r,607-r,x+r,607+r), fill=_alpha(PURPLE,a), outline=_alpha(PURPLE_DARK,a), width=2)
+            f = _font(_find_font(True), 25); tw = d.textlength(labels[i],font=f)
+            d.text((x-tw/2,592),labels[i],font=f,fill=_alpha(WHITE,a))
+            _draw_visual_card(d,(x-92,690,x+92,870),"ЕЛЕМЕНТ",point,elapsed-.25-i*.14,accent=(i==1),body_size=17)
+
+
+def _draw_howto_visual(canvas: Image.Image, scene: Dict[str, str], elapsed: float, cards=False) -> None:
+    d = ImageDraw.Draw(canvas, "RGBA")
+    points = _visual_points(scene.get("body", "")) or [scene.get("body", "")]
+    points = (points + _visual_points(scene.get("body", ""))[len(points):])[:3]
+    if cards:
+        for i, y in enumerate((470, 615, 760)):
+            x = 66 + (i%2)*24
+            _draw_visual_card(d,(x,y,654-(i%2)*24,y+118),f"КРОК 0{i+1}",points[i],elapsed-i*.16,accent=True,body_size=20)
+    else:
+        d.line((110, 500, 110, 880), fill=(195,183,221,255), width=6)
+        for i, y in enumerate((520, 690, 860)):
+            a = _ease_out((elapsed-.15-i*.2)/.45)
+            d.ellipse((80,y-30,140,y+30),fill=_alpha(PURPLE,a),outline=_alpha(PURPLE_DARK,a),width=2)
+            f = _font(_find_font(True),20); label=f"{i+1:02d}"; w=d.textlength(label,font=f)
+            d.text((110-w/2,y-13),label,font=f,fill=_alpha(WHITE,a))
+            font, lines, lh = _fit(d,points[i],_find_font(True),455,105,24,18,1.1)
+            yy=y-24
+            for line in lines:
+                d.text((172,yy),line,font=font,fill=_alpha(INK,a)); yy+=lh
+
+
+def _draw_myth_visual(canvas: Image.Image, scene: Dict[str, str], elapsed: float, reveal=False) -> None:
+    d = ImageDraw.Draw(canvas, "RGBA")
+    body = scene.get("body", "")
+    is_myth = bool(re.match(r"\s*(?:міф|твердження)\s*:", body, re.I))
+    label = "МІФ / ТВЕРДЖЕННЯ" if is_myth else "ПРАВДА / ПРАВОВИЙ ФАКТ"
+    if reveal:
+        p = _ease_out((elapsed-.18)/.5)
+        d.rounded_rectangle((70,470,650,900),radius=24,fill=_alpha(PURPLE_LIGHT,p),outline=_alpha(PURPLE,p),width=2)
+        d.text((102,510),label,font=_font(_find_font(True),20),fill=_alpha(PURPLE_DARK,p))
+        font,lines,lh=_fit(d,_visual_excerpt(body, 6),_find_font(True),480,220,31,21,1.12)
+        y=605
+        for line in lines:
+            d.text((102,y),line,font=font,fill=_alpha(INK,p)); y+=lh
+        d.line((102,830,610,830),fill=_alpha(PURPLE,.75),width=4)
+    else:
+        d.rounded_rectangle((70,470,650,900),radius=24,fill=(255,255,255,255),outline=(211,207,220,255),width=2)
+        d.rounded_rectangle((70,470,650,535),radius=20,fill=(*PURPLE_LIGHT,255))
+        d.text((102,490),label,font=_font(_find_font(True),20),fill=PURPLE_DARK)
+        font,lines,lh=_fit(d,_visual_excerpt(body, 6),_find_font(True),490,220,31,21,1.12)
+        y=610
+        for line in lines:
+            d.text((102,y),line,font=font,fill=INK); y+=lh
+        d.text((102,830),"МІФ  /  ПРАВДА",font=_font(_find_font(True),16),fill=MUTED)
+
+def _draw_case_visual(canvas: Image.Image, scene: Dict[str, str], elapsed: float, dossier=False) -> None:
+    d = ImageDraw.Draw(canvas, "RGBA")
+    body = scene.get("body", "")
+    if dossier:
+        d.rounded_rectangle((82,455,638,900),radius=18,fill=(255,255,255,255),outline=(205,201,215,255),width=2)
+        d.rounded_rectangle((105,480,615,545),radius=10,fill=(*PURPLE_LIGHT,255))
+        d.text((128,500),"СУДОВИЙ МАТЕРІАЛ",font=_font(_find_font(True),19),fill=PURPLE_DARK)
+        d.text((110,585),"ФАКТИ СПРАВИ",font=_font(_find_font(True),17),fill=MUTED)
+        font, lines, lh = _fit(d,_visual_excerpt(body, 7),_find_font(True),470,180,28,19,1.12)
+        y=625
+        for line in lines:
+            d.text((110,y),line,font=font,fill=INK); y+=lh
+        d.line((110,830,610,830),fill=(*PURPLE,255),width=4)
+    else:
+        d.line((115,500,115,870),fill=(191,179,222,255),width=6)
+        entries=[("ОБСТАВИНИ",body), ("ПРАВОВЕ ПИТАННЯ",_short_heading(body)), ("ОЦІНКА",_citation(body) or "СУДОВИЙ КОНТЕКСТ")]
+        for i,(label,value) in enumerate(entries):
+            y=505+i*165; a=_ease_out((elapsed-.18-i*.18)/.45)
+            d.ellipse((92,y-18,138,y+28),fill=_alpha(PURPLE,a))
+            d.text((170,y-4),label,font=_font(_find_font(True),16),fill=_alpha(PURPLE_DARK,a))
+            f, lines, lh=_fit(d,_visual_excerpt(value, 5),_find_font(True),445,88,22,17,1.1)
+            yy=y+30
+            for line in lines:
+                d.text((170,yy),line,font=f,fill=_alpha(INK,a)); yy+=lh
+
+
+def _draw_checklist_visual(canvas: Image.Image, scene: Dict[str, str], elapsed: float, grid=False) -> None:
+    d = ImageDraw.Draw(canvas, "RGBA")
+    points = _visual_points(scene.get("body", "")) or [scene.get("body", "")]
+    points = (points + _visual_points(scene.get("body", ""))[len(points):])[:3]
+    if grid:
+        coords=[(66,470),(370,470),(66,680)]
+        for i,(x,y) in enumerate(coords):
+            a=_ease_out((elapsed-.12-i*.18)/.4)
+            d.rounded_rectangle((x,y,x+284,y+190),radius=18,fill=_alpha(WHITE,a),outline=_alpha((207,203,216),a),width=2)
+            d.rounded_rectangle((x+22,y+24,x+62,y+64),radius=10,fill=_alpha(PURPLE_LIGHT,a),outline=_alpha(PURPLE,a),width=2)
+            f=_font(_find_font(True),22); d.text((x+33,y+31),"✓",font=f,fill=_alpha(PURPLE_DARK,a))
+            font,lines,lh=_fit(d,points[i],_find_font(True),238,95,21,16,1.1)
+            yy=y+88
+            for line in lines:
+                d.text((x+22,yy),line,font=font,fill=_alpha(INK,a)); yy+=lh
+    else:
+        for i,y in enumerate((485,625,765)):
+            a=_ease_out((elapsed-.15-i*.18)/.4)
+            d.rounded_rectangle((80,y,640,y+100),radius=16,fill=_alpha(WHITE,a),outline=_alpha((207,203,216),a),width=2)
+            d.rounded_rectangle((103,y+28,145,y+70),radius=9,fill=_alpha(PURPLE_LIGHT,a),outline=_alpha(PURPLE,a),width=2)
+            f=_font(_find_font(True),24); d.text((113,y+32),"✓",font=f,fill=_alpha(PURPLE_DARK,a))
+            font,lines,lh=_fit(d,points[i],_find_font(True),455,75,23,17,1.1)
+            yy=y+22
+            for line in lines:
+                d.text((168,yy),line,font=font,fill=_alpha(INK,a)); yy+=lh
+
+
+def _comparison_parts(text: str) -> Tuple[str,str]:
+    patterns = (r"\bбуло\s*[:—-]?\s*(.*?)\s+стало\s*[:—-]?\s*(.*)$",
+                r"\bдо\s*[:—-]?\s*(.*?)\s+після\s*[:—-]?\s*(.*)$")
+    for pattern in patterns:
+        m=re.search(pattern,text,re.I)
+        if m and m.group(1).strip() and m.group(2).strip():
+            return m.group(1).strip(),m.group(2).strip()
+    points=_key_points(text)
+    if len(points)>=2:return points[0],points[1]
+    return text[:max(1,len(text)//2)],text[max(1,len(text)//2):]
+
+
+def _draw_comparison_visual(canvas: Image.Image, scene: Dict[str, str], elapsed: float, scale=False) -> None:
+    d=ImageDraw.Draw(canvas,"RGBA"); left,right=_comparison_parts(scene.get("body",""))
+    if scale:
+        d.line((360,510,360,860),fill=(190,179,220,255),width=5)
+        d.line((185,560,535,560),fill=(*PURPLE,255),width=5)
+        d.ellipse((340,840,380,880),fill=(*PURPLE,255))
+        _draw_visual_card(d,(65,600,337,820),"ВАРІАНТ А",left,elapsed,accent=False,body_size=20)
+        _draw_visual_card(d,(383,600,655,820),"ВАРІАНТ Б",right,elapsed-.1,accent=True,body_size=20)
+    else:
+        _draw_visual_card(d,(60,485,350,870),"ВАРІАНТ А",left,elapsed,accent=False,body_size=22)
+        _draw_visual_card(d,(370,485,660,870),"ВАРІАНТ Б",right,elapsed-.15,accent=True,body_size=22)
+        f=_font(_find_font(True),24); d.text((342,650),"≠",font=f,fill=PURPLE_DARK)
+
+
+def _draw_qa_visual(canvas: Image.Image, scene: Dict[str, str], elapsed: float, answer=False) -> None:
+    d=ImageDraw.Draw(canvas,"RGBA"); body=scene.get("body","")
+    if answer:
+        p=_spring((elapsed-.18)/.65)
+        d.ellipse((245,455,475,685),outline=_alpha(PURPLE,.55),width=8)
+        f=_font(_find_font(True),130); d.text((300,465),"?",font=f,fill=_alpha(PURPLE,p))
+        _draw_visual_card(d,(68,700,652,885),"ВІДПОВІДЬ",body,elapsed-.25,accent=True,body_size=22)
+    else:
+        d.rounded_rectangle((70,470,650,900),radius=28,fill=(255,255,255,255),outline=(208,204,218,255),width=2)
+        f=_font(_find_font(True),150); d.text((93,480),"?",font=f,fill=(*PURPLE,255))
+        font,lines,lh=_fit(d,_visual_excerpt(body, 6),_find_font(True),480,190,31,21,1.1)
+        y=675
+        for line in lines:
+            d.text((110,y),line,font=font,fill=INK); y+=lh
+
+
+def _draw_risk_visual(canvas: Image.Image, scene: Dict[str, str], elapsed: float, path=False) -> None:
+    d=ImageDraw.Draw(canvas,"RGBA"); body=scene.get("body","")
+    p=_ease_out((elapsed-.12)/.45)
+    if path:
+        _draw_visual_card(d,(68,475,652,650),"РИЗИК",body,elapsed,accent=False,body_size=23)
+        d.line((110,730,610,730),fill=(213,207,220,255),width=5)
+        for i,x in enumerate((120,360,600)):
+            a=_ease_out((elapsed-.65-i*.18)/.4)
+            d.ellipse((x-18,712,x+18,748),fill=_alpha(PURPLE,a))
+        labels=["ВИЯВИТИ","ОЦІНИТИ","ДІЯТИ"]
+        for x,label in zip((120,360,600),labels):
+            f=_font(_find_font(True),14); w=d.textlength(label,font=f); d.text((x-w/2,775),label,font=f,fill=MUTED)
+    else:
+        # Warning geometry, with the actual source sentence as the main information.
+        triangle=[(360,460),(650,870),(70,870)]
+        d.polygon(triangle,fill=_alpha(PURPLE_LIGHT,p),outline=_alpha(PURPLE,p))
+        f=_font(_find_font(True),100); d.text((315,560),"!",font=f,fill=_alpha(PURPLE_DARK,p))
+        _draw_visual_card(d,(98,745,622,900),"ЗВЕРНІТЬ УВАГУ",body,elapsed-.2,accent=True,body_size=19)
 
 
 def _draw_content(canvas: Image.Image, scene: Dict[str, str], elapsed: float) -> None:
     d = ImageDraw.Draw(canvas, "RGBA")
     tag_font = _font(_find_font(True), 18)
     a = _ease_out((elapsed - .06) / .30)
-    d.text((48, 138), scene["label"], font=tag_font, fill=_alpha(PURPLE_DARK, a))
+    label = scene.get("label", "ПРАВОВЕ ПОЯСНЕННЯ")
+    d.text((48, 138), label, font=tag_font, fill=_alpha(PURPLE_DARK, a))
     d.rounded_rectangle((48, 174, 210, 181), radius=4, fill=_alpha(PURPLE, a))
-    title = _short_heading(scene.get("body", "")) 
+    title = _short_heading(scene.get("body", ""))
     _draw_word_reveal(d, title, _find_font(True), (48, 218), 620, 170, 54,
                       elapsed - .15, INK, line_delay=.12)
-    body = scene.get("body", "")
-    if _citation(body):
-        _draw_document_visual(canvas, scene, elapsed)
-    elif _numbers(body):
-        _draw_metric_visual(canvas, scene, elapsed)
-    elif _action_words(body):
-        _draw_steps_visual(canvas, scene, elapsed)
-    else:
-        _draw_generic_visual(canvas, scene, elapsed)
-    # Captions are the actual approved copy, not generated paraphrases.
+    layout = scene.get("layout", "concept_map")
+    if layout == "news_bulletin": _draw_news_visual(canvas, scene, elapsed, False)
+    elif layout == "news_timeline": _draw_news_visual(canvas, scene, elapsed, True)
+    elif layout == "concept_map": _draw_explainer_visual(canvas, scene, elapsed, False)
+    elif layout == "editorial_layers": _draw_explainer_visual(canvas, scene, elapsed, True)
+    elif layout == "steps_rail": _draw_howto_visual(canvas, scene, elapsed, False)
+    elif layout == "steps_cards": _draw_howto_visual(canvas, scene, elapsed, True)
+    elif layout == "myth_split": _draw_myth_visual(canvas, scene, elapsed, False)
+    elif layout == "myth_reveal": _draw_myth_visual(canvas, scene, elapsed, True)
+    elif layout == "case_timeline": _draw_case_visual(canvas, scene, elapsed, False)
+    elif layout == "case_dossier": _draw_case_visual(canvas, scene, elapsed, True)
+    elif layout == "checklist_grid": _draw_checklist_visual(canvas, scene, elapsed, True)
+    elif layout == "checklist_stack": _draw_checklist_visual(canvas, scene, elapsed, False)
+    elif layout == "comparison_split": _draw_comparison_visual(canvas, scene, elapsed, False)
+    elif layout == "comparison_scale": _draw_comparison_visual(canvas, scene, elapsed, True)
+    elif layout == "question_card": _draw_qa_visual(canvas, scene, elapsed, False)
+    elif layout == "answer_focus": _draw_qa_visual(canvas, scene, elapsed, True)
+    elif layout == "risk_alert": _draw_risk_visual(canvas, scene, elapsed, False)
+    elif layout == "risk_path": _draw_risk_visual(canvas, scene, elapsed, True)
+    else: _draw_explainer_visual(canvas, scene, elapsed, True)
+    # The complete audience-facing copy remains visible in the lower caption area.
     box_top = 960
     slide = int((1 - _ease_out((elapsed - .50) / .42)) * 64)
     d.rounded_rectangle((42, box_top + slide + 8, WIDTH-42, 1198 + slide + 8),
@@ -597,14 +1033,13 @@ def _draw_content(canvas: Image.Image, scene: Dict[str, str], elapsed: float) ->
     d.rounded_rectangle((42, box_top + slide, WIDTH-42, 1198 + slide),
                         radius=17, fill=(255,255,255,250), outline=(150,145,164,255), width=2)
     d.rounded_rectangle((42, box_top + slide, 52, 1198 + slide), radius=5, fill=(*PURPLE,255))
-    body_font, body_lines, line_h = _fit(d, body, _find_font(True), 590, 190, 31, 23, 1.14)
-    # Stagger by line to create a readable subtitle-style text reveal.
+    body = scene.get("body", "")
+    body_font, body_lines, line_h = _fit(d, body, _find_font(True), 590, 190, 29, 21, 1.12)
     yy = box_top + slide + max(22, int((216-len(body_lines)*line_h)/2))
     for i, line in enumerate(body_lines):
         alpha = _ease_out((elapsed - .66 - i*.07) / .35)
         d.text((72, yy + int((1-alpha)*12)), line, font=body_font, fill=_alpha(INK, alpha))
         yy += line_h
-
 
 def _draw_story(canvas: Image.Image, scene: Dict[str, str], elapsed: float) -> None:
     _draw_cover(canvas, scene, elapsed * .55)
@@ -789,7 +1224,7 @@ def build_video(job: Dict[str, Any], output_path: str | Path,
     video_bps=max(420_000,min(1_450_000,int((total_bytes_budget*8/duration)-audio_bps)))
     maxrate=int(video_bps*1.2)
     seed=content_id+str(job.get("headline",""))
-    with tempfile.TemporaryDirectory(prefix="sentinel-motion-v3-") as td:
+    with tempfile.TemporaryDirectory(prefix="sentinel-motion-v4-") as td:
         tmp=Path(td); audio=tmp/"music.wav"
         _synth_music(audio,duration,seed)
         cmd=[
@@ -831,7 +1266,8 @@ def build_video(job: Dict[str, Any], output_path: str | Path,
             "Скороти сценарій — текст автоматично не обрізається."
         )
     print(json.dumps({
-        "engine":"SENTINEL LAW Motion Engine V3",
+        "engine":"SENTINEL LAW Motion Engine V4",
+        "video_type":_infer_video_type(job),
         "content_id":content_id,
         "scene_count":len(scenes),
         "duration_seconds":round(info.get("duration",duration),2),
@@ -839,7 +1275,7 @@ def build_video(job: Dict[str, Any], output_path: str | Path,
         "resolution":f"{WIDTH}x{HEIGHT}",
         "fps":FPS,"audio":"AAC stereo",
         "text_policy":"all audience-facing script text retained",
-        "visual_style":"editorial kinetic typography / violet legal infographics"
+        "visual_style":"type-specific editorial layouts / kinetic legal graphics"
     },ensure_ascii=False))
     return output
 
@@ -848,7 +1284,7 @@ if __name__=="__main__":
     import argparse
     parser=argparse.ArgumentParser()
     parser.add_argument("--job",required=True)
-    parser.add_argument("--output",default="sentinel-law-v3.mp4")
+    parser.add_argument("--output",default="sentinel-law-v4.mp4")
     args=parser.parse_args()
     payload=json.loads(Path(args.job).read_text(encoding="utf-8"))
     build_video(payload,args.output)

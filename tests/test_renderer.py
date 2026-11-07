@@ -20,6 +20,8 @@ from renderer import (
     _infer_video_type,
     _layout_for,
     _make_scenes,
+    _parse_storyboard_scenes,
+    _probe,
     _scene_durations,
     _scene_label,
     _split_script,
@@ -28,7 +30,7 @@ from renderer import (
 )
 
 
-class MotionEngineV41Tests(unittest.TestCase):
+class MotionEngineV42Tests(unittest.TestCase):
     def test_full_copy_is_preserved_in_order(self):
         source = (
             "Військовослужбовець має право знати зміст наказу. "
@@ -269,6 +271,62 @@ class MotionEngineV41Tests(unittest.TestCase):
         self.assertEqual(scenes[0]["kind"], "story")
         frame = _draw_frame(scenes[0], 1, 1, 30, 30, 360)
         self.assertEqual(frame.size, (WIDTH, HEIGHT))
+
+
+    def test_five_scene_storyboard_preserves_subtitles_titles_and_requested_timing(self):
+        brief = (
+            "Тривалість: близько 25 секунд.\n"
+            "Сцена 1 (0–4 с): Кадр із текстовою заставкою. Субтитр: «Кредит до 1 млрд грн для бізнесу — вже доступний?»\n"
+            "Сцена 2 (4–9 с): На екрані з’являється напис «Постанову ухвалено». Субтитр: «За повідомленням джерела, Кабмін ухвалив постанову про програму».\n"
+            "Сцена 3 (9–14 с): Текстова картка з цифрами «до 1 млрд грн» і «5,5%». Субтитр: «Анонсовано кредитування з компенсацією ставки 5,5%».\n"
+            "Сцена 4 (14–20 с): Напис «Механізм ще реалізують». Субтитр: «Практичний механізм кредитування ще потребує запуску».\n"
+            "Сцена 5 (20–25 с): Текстова картка «Умови? Дата старту? Банки?». Субтитр: «Цих деталей у повідомленні немає. Перевіряйте офіційні умови перед заявкою».\n"
+            "Візуальні примітки: використовувати текстові картки; не показувати вигадані кадри зустрічі чи документи, яких немає у джерелі."
+        )
+        parsed = _parse_storyboard_scenes(brief)
+        self.assertEqual(len(parsed), 5)
+        self.assertEqual(parsed[2]["visual_title"], "до 1 млрд грн · 5,5%")
+        self.assertIn("5,5%", parsed[2]["body"])
+
+        scenes = _make_scenes({
+            "format": "Reels", "video_type": "news", "content_id": "CREDIT-NEWS-STORYBOARD-001",
+            "headline": "Кредит до 1 млрд грн для бізнесу — вже доступний?", "script": brief,
+        })
+        self.assertEqual(len(scenes), 5)
+        self.assertEqual([scene["kind"] for scene in scenes], ["cover", "content", "content", "content", "content"])
+        self.assertEqual(scenes[1]["visual_title"], "Постанову ухвалено")
+        self.assertEqual(scenes[2]["visual_title"], "до 1 млрд грн · 5,5%")
+        self.assertEqual(scenes[3]["visual_title"], "Механізм ще реалізують")
+        self.assertEqual(scenes[4]["visual_title"], "Умови? Дата старту? Банки?")
+        self.assertIn("Перевіряйте офіційні умови", scenes[4]["body"])
+        self.assertEqual(_scene_durations(scenes, "reels"), [4.0, 5.0, 5.0, 6.0, 5.0])
+        self.assertEqual(sum(_scene_durations(scenes, "reels")), 25.0)
+        extracted = _extract_script_text(brief)
+        self.assertIn("Кредит до 1 млрд грн", extracted)
+        self.assertIn("5,5%", extracted)
+        self.assertIn("Перевіряйте офіційні умови", extracted)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg/ffprobe are required for MP4 smoke test")
+    def test_storyboard_renders_valid_25_second_five_scene_mp4(self):
+        brief = (
+            "Сцена 1 (0–4 с): Заставка. Субтитр: «Кредит для бізнесу — вже доступний?»\n"
+            "Сцена 2 (4–9 с): Напис «Постанову ухвалено». Субтитр: «Кабмін ухвалив постанову про програму».\n"
+            "Сцена 3 (9–14 с): Картка «до 1 млрд грн · 5,5%». Субтитр: «Анонсовано кредитування з компенсацією ставки 5,5%».\n"
+            "Сцена 4 (14–20 с): Напис «Механізм ще реалізують». Субтитр: «Механізм кредитування ще потребує запуску».\n"
+            "Сцена 5 (20–25 с): Картка «Умови? Дата старту? Банки?». Субтитр: «Перевіряйте офіційні умови перед заявкою»."
+        )
+        job = {
+            "job_id": "TEST-STORYBOARD-001", "content_id": "TEST-STORYBOARD-001",
+            "format": "Reels", "video_type": "news",
+            "headline": "Кредит для бізнесу — чи вже доступний?", "script": brief,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "storyboard.mp4"
+            build_video(job, target)
+            self.assertTrue(target.exists())
+            self.assertLessEqual(target.stat().st_size, 8_500_000)
+            info = _probe(target)
+            self.assertAlmostEqual(info["duration"], 25.0, delta=0.1)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg/ffprobe are required for MP4 smoke test")
     def test_build_video_produces_valid_mp4(self):

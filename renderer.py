@@ -1,4 +1,4 @@
-"""SENTINEL LAW Motion Engine V4.1.
+"""SENTINEL LAW Motion Engine V4.2.
 
 Type-driven editorial motion graphics for Ukrainian legal Instagram Reels and Stories.
 The public build_video(job, output_path) contract is kept compatible with worker.py.
@@ -128,8 +128,130 @@ def _looks_like_visual_continuation(line: str) -> bool:
     return any(re.search(pattern, value, re.I) for pattern in patterns)
 
 
+_SCENE_START = re.compile(
+    r"^\s*(?:СЦЕНА|SCENE)\s*(\d+)\b(?:\s*\(([^)]*)\))?\s*:\s*(.*)$", re.I
+)
+_SUBTITLE_MARKER = re.compile(
+    r"\b(?:СУБТИТРИ?|ТЕКСТ\s+ДИКТОРА|ТЕКСТ\s+ДЛЯ\s+ОЗВУЧКИ|ГОЛОС\s+ЗА\s+КАДРОМ|"
+    r"РЕПЛІКА|ОЗВУЧКА|ТЕКСТ\s+НА\s+ЕКРАНІ)\s*:\s*(.+)", re.I
+)
+_QUOTED_TEXT = re.compile(r"[«“\"]([^»”\"]+)[»”\"]")
+
+
+def _duration_from_scene_range(value: str) -> float | None:
+    """Read scene duration from forms such as 0–4 с or 00:04–00:09."""
+    text = str(value or "").strip()
+    clock = re.search(r"(\d{1,2}):(\d{2})\s*[–—-]\s*(\d{1,2}):(\d{2})", text)
+    if clock:
+        start = int(clock.group(1)) * 60 + int(clock.group(2))
+        end = int(clock.group(3)) * 60 + int(clock.group(4))
+        return float(end - start) if end > start else None
+    seconds = re.search(
+        r"(\d+(?:[.,]\d+)?)\s*[–—-]\s*(\d+(?:[.,]\d+)?)\s*(?:с|сек(?:унд[а-я]*)?)?\b",
+        text, re.I,
+    )
+    if seconds:
+        start = float(seconds.group(1).replace(",", "."))
+        end = float(seconds.group(2).replace(",", "."))
+        return end - start if end > start else None
+    return None
+
+
+def _unquote_copy(value: str) -> str:
+    value = re.sub(r"\s+", " ", str(value or "")).strip()
+    match = _QUOTED_TEXT.search(value)
+    if match:
+        return match.group(1).strip()
+    return value.strip(" \t\"'«»“”")
+
+
+def _parse_storyboard_scenes(script: str) -> List[Dict[str, Any]]:
+    """Parse numbered storyboard scenes while retaining the spoken/subtitle copy.
+
+    Example accepted line:
+      Сцена 3 (9–14 с): Картка з цифрами «до 1 млрд грн» і «5,5%».
+      Субтитр: «Анонсовано кредитування з компенсацією ставки 5,5%».
+    """
+    source = _clean(script)
+    if not source:
+        return []
+
+    blocks: List[Dict[str, Any]] = []
+    current: Dict[str, Any] | None = None
+    for raw in source.split("\n"):
+        line = raw.strip().lstrip("-•* ").strip()
+        if not line:
+            continue
+        start = _SCENE_START.match(line)
+        if start:
+            if current:
+                blocks.append(current)
+            current = {
+                "number": int(start.group(1)),
+                "range": start.group(2) or "",
+                "lines": [start.group(3).strip()] if start.group(3).strip() else [],
+            }
+            # Timecode may be written immediately after the colon instead of in parentheses.
+            if not current["range"]:
+                current["range"] = start.group(3).strip()
+            continue
+        if current is None:
+            continue
+        # Global technical notes after the storyboard are not scene content.
+        if _TECHNICAL_HEADING.match(line) or re.match(
+            r"^(?:РЕЖИСЕРСЬКІ ВКАЗІВКИ|ТЕХНІЧНЕ ЗАВДАННЯ)\b", line, re.I
+        ):
+            blocks.append(current)
+            current = None
+            continue
+        current["lines"].append(line)
+    if current:
+        blocks.append(current)
+
+    parsed: List[Dict[str, Any]] = []
+    for block in blocks:
+        block_lines = [line for line in block["lines"] if line]
+        raw_text = " ".join(block_lines)
+        subtitle_match = _SUBTITLE_MARKER.search(raw_text)
+
+        if subtitle_match:
+            body = _unquote_copy(subtitle_match.group(1))
+            visual_description = raw_text[:subtitle_match.start()]
+        else:
+            # Fallback to any explicitly audience-facing label in a multiline scene.
+            body = ""
+            visual_description = raw_text
+            for label in _AUDIENCE_LABELS:
+                match = re.search(r"\b" + re.escape(label) + r"\s*:\s*(.+)", raw_text, re.I)
+                if match:
+                    body = _unquote_copy(match.group(1))
+                    visual_description = raw_text[:match.start()]
+                    break
+
+        quoted_visuals = [_unquote_copy(item) for item in _QUOTED_TEXT.findall(visual_description)]
+        visual_title = " · ".join(item for item in quoted_visuals if item)
+        if not body and visual_title:
+            body = visual_title
+        if not body:
+            continue
+        scene_range = str(block.get("range") or "")
+        duration = _duration_from_scene_range(scene_range)
+        parsed.append({
+            "number": str(block["number"]),
+            "body": body,
+            "visual_title": visual_title,
+            "duration_seconds": duration,
+        })
+
+    # Do not silently treat arbitrary mentions of "Сцена 1" as a storyboard.
+    return parsed if len(parsed) >= 2 else []
+
+
 def _extract_script_text(script: str) -> str:
     """Remove production directions while retaining all explicitly labelled audience copy."""
+    storyboard = _parse_storyboard_scenes(script)
+    if storyboard:
+        return " ".join(scene["body"] for scene in storyboard).strip()
     source = _clean(script)
     if not source:
         return ""
@@ -370,11 +492,16 @@ def _layout_for(video_type: str, index: int, content_id: str) -> str:
     return options[variant]
 
 
-def _make_scenes(job: Dict[str, Any]) -> List[Dict[str, str]]:
+def _make_scenes(job: Dict[str, Any]) -> List[Dict[str, Any]]:
     fmt = str(job.get("format") or "Reels").strip().lower()
     headline = _clean(job.get("headline") or job.get("topic") or "Правовий розбір", 500)
-    source_script = str(job.get("script") or job.get("caption") or headline)
-    script = _extract_script_text(source_script) or headline
+    source_script = str(
+        job.get("script") or job.get("caption") or job.get("source_text")
+        or job.get("full_text") or job.get("article_text") or job.get("body") or job.get("text") or headline
+    )
+    storyboard = _parse_storyboard_scenes(source_script)
+    script = (" ".join(scene["body"] for scene in storyboard) if storyboard
+              else (_extract_script_text(source_script) or headline))
     cta = _clean(job.get("cta") or "Збережіть матеріал, щоб повернутися до нього", 400)
     content_id = str(job.get("content_id") or job.get("job_id") or headline)
     video_type = _infer_video_type({**job, "script": script})
@@ -387,6 +514,32 @@ def _make_scenes(job: Dict[str, Any]) -> List[Dict[str, str]]:
             "title": _clean(job.get("story_title") or headline, 400),
             "body": script, "video_type": video_type, "layout": layout,
         }]
+
+    # A storyboard is already a scene-by-scene editorial plan. Keep its scene count,
+    # audience copy, on-screen labels and supplied timing instead of flattening it.
+    if storyboard:
+        scenes: List[Dict[str, Any]] = []
+        for index, item in enumerate(storyboard):
+            duration = item.get("duration_seconds")
+            common: Dict[str, Any] = {
+                "label": label, "video_type": video_type, "layout": layout,
+                "sequence": str(index + 1),
+            }
+            if duration is not None:
+                common["duration_seconds"] = str(duration)
+            if index == 0:
+                scenes.append({
+                    **common, "kind": "cover",
+                    "title": item.get("visual_title") or item["body"],
+                    "body": "", "headline": headline,
+                })
+            else:
+                scenes.append({
+                    **common, "kind": "content", "title": "",
+                    "visual_title": item.get("visual_title", ""),
+                    "headline": headline, "body": item["body"],
+                })
+        return scenes
 
     scenes: List[Dict[str, str]] = [{
         "kind": "cover", "label": label, "title": headline, "body": "",
@@ -412,6 +565,15 @@ def _scene_durations(scenes: Sequence[Dict[str, str]], fmt: str) -> List[float]:
         return [12.0]
     durations: List[float] = []
     for scene in scenes:
+        requested = scene.get("duration_seconds")
+        if requested not in (None, ""):
+            try:
+                requested_value = float(requested)
+            except (TypeError, ValueError):
+                requested_value = 0.0
+            if requested_value > 0:
+                durations.append(requested_value)
+                continue
         if scene["kind"] == "cover":
             durations.append(3.5)
         elif scene["kind"] == "closing":
@@ -737,7 +899,7 @@ def _draw_news_visual(canvas: Image.Image, scene: Dict[str, str], elapsed: float
     draw.rounded_rectangle((84, 485, 268, 527), radius=9, fill=(*PURPLE_LIGHT, 255))
     draw.text((99, 497), "ОФІЦІЙНЕ ОНОВЛЕННЯ", font=_font(_find_font(True), 13), fill=PURPLE_DARK)
     draw.text((85, 555), "ЩО ЗМІНИЛОСЯ", font=_font(_find_font(True), 27), fill=INK)
-    font, lines, line_height = _fit(draw, _visual_excerpt(body, 12), _find_font(True), 500, 132, 26, 18, 1.1)
+    font, lines, line_height = _fit(draw, _visual_excerpt(body, 18), _find_font(True), 500, 132, 26, 18, 1.1)
     for idx, line in enumerate(lines):
         draw.text((86, 610 + idx * line_height), line, font=font, fill=INK)
     if timeline:
@@ -853,7 +1015,7 @@ def _draw_content(canvas: Image.Image, scene: Dict[str, str], elapsed: float) ->
     alpha = _ease_out((elapsed - 0.06) / 0.30)
     draw.text((48, 138), label, font=_font(_find_font(True), 17), fill=_alpha(PURPLE_DARK, alpha))
     draw.rounded_rectangle((48, 174, 240, 181), radius=4, fill=_alpha(PURPLE, alpha))
-    heading = _content_heading(scene)
+    heading = scene.get("visual_title") or _content_heading(scene)
     _draw_word_reveal(draw, heading.upper(), _find_font(True), (48, 218), 620, 170, 51,
                       elapsed - 0.15, INK, line_delay=0.12)
 
@@ -897,21 +1059,29 @@ def _draw_content(canvas: Image.Image, scene: Dict[str, str], elapsed: float) ->
     else:
         raise ValueError(f"Невідомий тип композиції: {layout}")
 
-    # Complete audience-facing copy remains visible; the upper cards are short visual excerpts.
-    box_top = 960
-    slide = int((1 - _ease_out((elapsed - 0.50) / 0.42)) * 64)
-    draw.rounded_rectangle((42, box_top + slide + 8, WIDTH - 42, 1198 + slide + 8), radius=17,
-                           fill=(18, 14, 35, 20))
-    draw.rounded_rectangle((42, box_top + slide, WIDTH - 42, 1198 + slide), radius=17,
-                           fill=(255, 255, 255, 250), outline=(150, 145, 164, 255), width=2)
-    draw.rounded_rectangle((42, box_top + slide, 52, 1198 + slide), radius=5, fill=(*PURPLE, 255))
+    # The news panel already carries the complete short storyboard subtitle.
+    # Do not repeat it in a second card; retain the full-width copy box for prose chunks
+    # and for long storyboards that exceed the excerpt capacity.
     body = scene.get("body", "")
-    font, lines, line_height = _fit(draw, body, _find_font(True), 590, 190, 29, 19, 1.12)
-    y = box_top + slide + max(22, int((216 - len(lines) * line_height) / 2))
-    for idx, line in enumerate(lines):
-        opacity = _ease_out((elapsed - 0.66 - idx * 0.07) / 0.35)
-        draw.text((72, y + int((1 - opacity) * 12)), line, font=font, fill=_alpha(INK, opacity))
-        y += line_height
+    complete_in_news_panel = (
+        layout in ("news_bulletin", "news_timeline")
+        and bool(scene.get("visual_title"))
+        and len(body.split()) <= 18
+    )
+    if not complete_in_news_panel:
+        box_top = 960
+        slide = int((1 - _ease_out((elapsed - 0.50) / 0.42)) * 64)
+        draw.rounded_rectangle((42, box_top + slide + 8, WIDTH - 42, 1198 + slide + 8), radius=17,
+                               fill=(18, 14, 35, 20))
+        draw.rounded_rectangle((42, box_top + slide, WIDTH - 42, 1198 + slide), radius=17,
+                               fill=(255, 255, 255, 250), outline=(150, 145, 164, 255), width=2)
+        draw.rounded_rectangle((42, box_top + slide, 52, 1198 + slide), radius=5, fill=(*PURPLE, 255))
+        font, lines, line_height = _fit(draw, body, _find_font(True), 590, 190, 29, 19, 1.12)
+        y = box_top + slide + max(22, int((216 - len(lines) * line_height) / 2))
+        for idx, line in enumerate(lines):
+            opacity = _ease_out((elapsed - 0.66 - idx * 0.07) / 0.35)
+            draw.text((72, y + int((1 - opacity) * 12)), line, font=font, fill=_alpha(INK, opacity))
+            y += line_height
 
 
 def _draw_story(canvas: Image.Image, scene: Dict[str, str], elapsed: float) -> None:
@@ -1145,7 +1315,7 @@ def build_video(job: Dict[str, Any], output_path: str | Path, ffmpeg: str = "ffm
             "Скороти сценарій — текст автоматично не обрізається."
         )
     print(json.dumps({
-        "engine": "SENTINEL LAW Motion Engine V4.1",
+        "engine": "SENTINEL LAW Motion Engine V4.2",
         "video_type": scenes[0].get("video_type", _infer_video_type(job)),
         "content_id": content_id,
         "scene_count": len(scenes),
@@ -1162,7 +1332,7 @@ def build_video(job: Dict[str, Any], output_path: str | Path, ffmpeg: str = "ffm
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="SENTINEL LAW Motion Engine V4.1")
+    parser = argparse.ArgumentParser(description="SENTINEL LAW Motion Engine V4.2")
     parser.add_argument("--job", required=True, help="Path to a JSON job payload")
     parser.add_argument("--output", default="sentinel-law-v4.mp4", help="Output MP4 path")
     args = parser.parse_args()

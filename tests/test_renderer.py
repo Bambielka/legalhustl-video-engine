@@ -1,10 +1,10 @@
 import unittest
 from renderer import (
     _citation, _extract_script_text, _fit, _find_font, _make_scenes, _scene_durations,
-    _split_script, _scene_label
+    _split_script, _scene_label, _infer_video_type
 )
 
-class MotionEngineV3Tests(unittest.TestCase):
+class MotionEngineV4Tests(unittest.TestCase):
     def test_full_copy_is_preserved_in_order(self):
         source = (
             "Військовослужбовець має право знати зміст наказу. "
@@ -62,6 +62,63 @@ class MotionEngineV3Tests(unittest.TestCase):
         cta = "Збережіть матеріал і звертайтеся за фаховою правовою допомогою"
         scenes = _make_scenes({"format":"Reels","headline":"Тест","script":"Короткий матеріал.","cta":cta})
         self.assertEqual(scenes[-1]["body"], cta)
+
+
+    def test_visual_notes_heading_and_instruction_are_removed(self):
+        brief = (
+            "ВІЗУАЛЬНІ ПРИМІТКИ: використовувати текстові картки, не показувати вигадані кадри чи документи.\n"
+            "ФАКТ: Кабінет Міністрів ухвалив постанову щодо програми.\n"
+            "УМОВА: Механізм почне діяти після офіційного оприлюднення порядку.\n"
+            "ЩО ВАЖЛИВО: Перевірте умови до подання заявки."
+        )
+        result = _extract_script_text(brief)
+        self.assertNotIn("ВІЗУАЛЬНІ ПРИМІТКИ", result)
+        self.assertNotIn("використовувати текстові картки", result.lower())
+        self.assertNotIn("вигадані кадри", result.lower())
+        self.assertIn("Кабінет Міністрів ухвалив постанову", result)
+        self.assertIn("Механізм почне діяти", result)
+        self.assertIn("Перевірте умови", result)
+
+    def test_myth_and_truth_labels_are_preserved_for_layout(self):
+        result = _extract_script_text("МІФ: Рішення не можна оскаржити.\nПРАВДА: Окремі рішення можуть бути оскаржені.")
+        self.assertIn("МІФ: Рішення не можна оскаржити", result)
+        self.assertIn("ПРАВДА: Окремі рішення можуть бути оскаржені", result)
+
+    def test_editorial_video_type_detection(self):
+        cases = [
+            ({"headline":"Кабмін ухвалив зміни до програми","script":"Постанову ухвалено."}, "news"),
+            ({"headline":"Як подати рапорт","script":"Спочатку підготуйте документ."}, "howto"),
+            ({"headline":"Міф чи правда про оскарження","script":"Міф: рішення остаточне."}, "myth_fact"),
+            ({"headline":"Що вирішив суд у справі","script":"Суд перевірив обставини спору."}, "case"),
+            ({"headline":"Які документи потрібні","script":"Перелік документів для звернення."}, "checklist"),
+            ({"headline":"Було / стало: новий порядок","script":"Було: особисто. Стало: онлайн."}, "comparison"),
+            ({"headline":"Чи має право військовий на виплату?","script":"Право залежить від підстав."}, "qa"),
+            ({"headline":"Помилка під час подання скарги","script":"Пропуск строку створює ризик."}, "risk"),
+            ({"headline":"Як працює правовий механізм","script":"Правовий механізм має кілька складових."}, "explainer"),
+        ]
+        for job, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(_infer_video_type(job), expected)
+
+    def test_each_editorial_type_uses_a_distinct_layout_family(self):
+        jobs = {
+            "news": {"headline":"Офіційно ухвалено зміни до порядку","script":"Зміни набрали чинності."},
+            "howto": {"headline":"Як подати рапорт","script":"Підготуйте рапорт та подайте його."},
+            "myth_fact": {"headline":"Міф чи правда","script":"Міф: це неможливо."},
+            "case": {"headline":"Судове рішення у справі","script":"Суд дійшов висновку."},
+            "checklist": {"headline":"Перелік документів","script":"Які документи потрібно підготувати."},
+            "comparison": {"headline":"Було / стало","script":"Було одне правило, стало інше."},
+            "qa": {"headline":"Чи можна оскаржити рішення?","script":"Так, за визначених умов."},
+            "risk": {"headline":"Ризик пропуску строку","script":"Не пропускайте строк."},
+            "explainer": {"headline":"Правовий механізм","script":"Механізм складається з декількох елементів."},
+        }
+        layouts = {}
+        for expected, values in jobs.items():
+            scenes = _make_scenes({"format":"Reels", "content_id":expected, **values})
+            content = next(scene for scene in scenes if scene["kind"] == "content")
+            self.assertEqual(content["video_type"], expected)
+            layouts[expected] = content["layout"]
+        self.assertEqual(len(set(layouts.values())), len(layouts))
 
     def test_story_remains_single_story_scene(self):
         scenes = _make_scenes({"format":"Story","headline":"Пам'ятка","story_title":"Пам'ятка","script":"Збережіть документ."})

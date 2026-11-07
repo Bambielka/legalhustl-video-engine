@@ -10,7 +10,7 @@ on:
       - "requirements.txt"
       - ".github/workflows/render.yml"
       - "sample-job.json"
-      - "sample-story.json"
+      - "sample-news-storyboard.json"
   pull_request:
     paths:
       - "renderer.py"
@@ -19,7 +19,7 @@ on:
       - "requirements.txt"
       - ".github/workflows/render.yml"
       - "sample-job.json"
-      - "sample-story.json"
+      - "sample-news-storyboard.json"
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
